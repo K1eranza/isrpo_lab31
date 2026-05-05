@@ -34,6 +34,7 @@ public class TasksController : ControllerBase
 
         return Ok(tasks);
     }
+    
     [HttpGet("{id}")]
     public async Task<ActionResult<TaskItem>> GetById(int id)
     {
@@ -42,6 +43,7 @@ public class TasksController : ControllerBase
             return NotFound(new { Message = $"Задача с id={id} не найдена" });
         return Ok(task);
     }
+    
     [HttpPost]
     public async Task<ActionResult<TaskItem>> Create([FromBody] CreateTaskDto dto)
     {
@@ -54,7 +56,8 @@ public class TasksController : ControllerBase
             Description = dto.Description?.Trim() ?? string.Empty,
             Priority = dto.Priority,
             IsCompleted = false,
-            CreatedAt = DateTime.UtcNow
+            CreatedAt = DateTime.UtcNow,
+            DueDate = dto.DueDate
         };
 
         _db.Tasks.Add(task);
@@ -62,6 +65,7 @@ public class TasksController : ControllerBase
 
         return CreatedAtAction(nameof(GetById), new { id = task.Id }, task);
     }
+    
     [HttpPut("{id}")]
     public async Task<ActionResult<TaskItem>> Update(int id, [FromBody] UpdateTaskDto dto)
     {
@@ -76,7 +80,7 @@ public class TasksController : ControllerBase
         task.Description = dto.Description?.Trim() ?? string.Empty;
         task.IsCompleted = dto.IsCompleted;
         task.Priority = dto.Priority;
-
+        task.DueDate = dto.DueDate;
         await _db.SaveChangesAsync();
         return Ok(task);
     }
@@ -103,5 +107,101 @@ public class TasksController : ControllerBase
         _db.Tasks.Remove(task);
         await _db.SaveChangesAsync();
         return NoContent();
+    }
+    
+    [HttpGet("search")]
+    public async Task<ActionResult<IEnumerable<TaskItem>>> Search(
+        [FromQuery] string? query = null,
+        [FromQuery] string? priority = null,
+        [FromQuery] bool? completed = null)
+    {
+        var q = _db.Tasks.AsQueryable();
+
+        if (!string.IsNullOrWhiteSpace(query))
+            q = q.Where(t => t.Title.Contains(query) || t.Description.Contains(query));
+        if (!string.IsNullOrWhiteSpace(priority))
+            q = q.Where(t => t.Priority == priority);
+        if (completed.HasValue)
+            q = q.Where(t => t.IsCompleted == completed.Value);
+
+        var results = await q
+            .OrderByDescending(t => t.CreatedAt)
+            .ToListAsync();
+
+        return Ok(results);
+    }
+    
+    // GET /api/tasks/stats
+    [HttpGet("stats")]
+    public async Task<ActionResult> GetStats()
+    {
+        var total = await _db.Tasks.CountAsync();
+        var completed = await _db.Tasks.CountAsync(t => t.IsCompleted);
+        var pending = total - completed;
+
+        var byPriority = await _db.Tasks
+            .GroupBy(t => t.Priority)
+            .Select(g => new { Priority = g.Key, Count = g.Count() })
+            .ToListAsync();
+
+        var recentDate = DateTime.UtcNow.AddDays(-7);
+        var recentCount = await _db.Tasks
+            .CountAsync(t => t.CreatedAt >= recentDate);
+
+        return Ok(new
+        {
+            Total = total,
+            Completed = completed,
+            Pending = pending,
+            CompletionPct = total > 0 ? Math.Round((double)completed / total * 100, 1) : 0,
+            ByPriority = byPriority,
+            CreatedLastWeek = recentCount
+        });
+    }
+    
+    // GET /api/tasks/paged?page=1&pageSize=2
+    [HttpGet("paged")]
+    public async Task<ActionResult> GetPaged(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 5)
+    {
+        if (page < 1) page = 1;
+        if (pageSize < 1) pageSize = 5;
+        if (pageSize > 50) pageSize = 50;
+
+        var totalCount = await _db.Tasks.CountAsync();
+        var totalPages = (int)Math.Ceiling((double)totalCount / pageSize);
+
+        var tasks = await _db.Tasks
+            .OrderByDescending(t => t.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        return Ok(new
+        {
+            Page = page,
+            PageSize = pageSize,
+            TotalCount = totalCount,
+            TotalPages = totalPages,
+            HasPrev = page > 1,
+            HasNext = page < totalPages,
+            Items = tasks
+        });
+    }
+
+    // GET /api/tasks/overdue
+    [HttpGet("overdue")]
+    public async Task<ActionResult<IEnumerable<TaskItem>>> GetOverdue()
+    {
+        var now = DateTime.UtcNow;
+        var overdue = await _db.Tasks
+            .Where(t => t.DueDate != null
+                && t.DueDate < now
+                && !t.IsCompleted)
+            .OrderBy(t => t.DueDate)
+            .ToListAsync();
+
+        return Ok(overdue);
     }
 }
